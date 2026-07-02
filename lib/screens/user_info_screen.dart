@@ -29,7 +29,7 @@ class _UserInfoScreenState extends State<UserInfoScreen> {
   }
 
   void _loadUser() {
-    final model = PocketBaseService().pb.authStore.model;
+    final model = PocketBaseService().pb.authStore.record;
     if (model is RecordModel) {
       _email = model.data['email'] ?? model.id;
     } else {

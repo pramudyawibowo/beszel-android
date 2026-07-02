@@ -47,9 +47,6 @@ class BiometricService {
         ),
       );
     } on PlatformException catch (e) {
-      // Debug: print error
-      // ignore: avoid_print
-      print('Biometric auth error: $e');
       return false;
     }
   }

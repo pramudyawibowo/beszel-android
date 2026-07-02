@@ -231,7 +231,7 @@ class _PinScreenState extends State<PinScreen> {
         onPressed: () => _handleKeyPress(value),
         style: TextButton.styleFrom(
           shape: const CircleBorder(),
-          backgroundColor: Colors.grey.withOpacity(0.1),
+          backgroundColor: Colors.grey.withValues(alpha: 0.1),
         ),
         child: Text(
           value,

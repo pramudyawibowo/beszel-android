@@ -14,7 +14,7 @@ class AlertManager extends ChangeNotifier {
   AlertManager._internal();
 
   List<Alert> _alerts = [];
-  
+
   List<Alert> get alerts => List.unmodifiable(_alerts);
 
   Future<void> loadAlerts() async {
@@ -26,19 +26,24 @@ class AlertManager extends ChangeNotifier {
       final List<Alert> loaded = [];
       // Assuming list is stored as [newest, ..., oldest]
       for (final str in alertsJson) {
-        if (loaded.length >= 50) break; 
+        if (loaded.length >= 50) break;
         try {
           loaded.add(Alert.fromJson(jsonDecode(str)));
         } catch (_) {}
       }
       // Sort just in case, though insertion order should be preserved
       loaded.sort((a, b) => b.timestamp.compareTo(a.timestamp));
-      _alerts = loaded; 
+      _alerts = loaded;
       notifyListeners();
     }
   }
 
-  Future<void> addAlert(String title, String message, String type, String systemName) async {
+  Future<void> addAlert(
+    String title,
+    String message,
+    String type,
+    String systemName,
+  ) async {
     final alert = Alert(
       id: const Uuid().v4(),
       title: title,

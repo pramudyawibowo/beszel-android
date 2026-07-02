@@ -8,6 +8,7 @@ class System {
   final double cpuPercent;
   final double memoryPercent;
   final double diskPercent;
+  final double? gpuPercent;
   final String updated;
   final String? os;
   final Map<String, dynamic> info;
@@ -20,6 +21,7 @@ class System {
     required this.cpuPercent,
     required this.memoryPercent,
     required this.diskPercent,
+    this.gpuPercent,
     required this.updated,
     this.os,
     required this.info,
@@ -34,6 +36,13 @@ class System {
       return 0.0;
     }
 
+    double? toDoubleOrNull(dynamic val) {
+      if (val is int) return val.toDouble();
+      if (val is double) return val;
+      if (val is String) return double.tryParse(val);
+      return null;
+    }
+
     final info = record.data['info'] is Map
         ? record.data['info'] as Map<String, dynamic>
         : <String, dynamic>{};
@@ -46,7 +55,8 @@ class System {
       cpuPercent: toDouble(info['cpu']),
       memoryPercent: toDouble(info['mp']),
       diskPercent: toDouble(info['dp']),
-      updated: record.updated,
+      gpuPercent: toDoubleOrNull(info['g']),
+      updated: record.get<String>('updated'),
       os: info['k'] as String?,
       info: info,
     );

@@ -99,8 +99,9 @@ class _DashboardScreenState extends State<DashboardScreen> {
   }
 
   void _checkAlerts(System oldSystem, System newSystem) {
-    if (Provider.of<AlertManager>(context, listen: false).alerts.isNotEmpty)
+    if (Provider.of<AlertManager>(context, listen: false).alerts.isNotEmpty) {
       return;
+    }
     // 1. Check for DOWN status
     if (oldSystem.status == 'up' && newSystem.status == 'down') {
       _triggerAlert(
@@ -149,8 +150,9 @@ class _DashboardScreenState extends State<DashboardScreen> {
   }
 
   void _checkInitialAlerts() {
-    if (Provider.of<AlertManager>(context, listen: false).alerts.isNotEmpty)
+    if (Provider.of<AlertManager>(context, listen: false).alerts.isNotEmpty) {
       return;
+    }
     for (final system in _systems) {
       // 1. Check for DOWN status
       if (system.status == 'down') {
@@ -381,44 +383,56 @@ class _DashboardScreenState extends State<DashboardScreen> {
       return '${bytes.toStringAsFixed(2)} ${suffixes[i]}';
     }
 
+    final colorScheme = Theme.of(context).colorScheme;
+
     return Card(
-      margin: const EdgeInsets.symmetric(vertical: 6, horizontal: 8),
-      elevation: 2,
-      color: Theme.of(context).colorScheme.primaryContainer.withOpacity(0.3),
+      margin: const EdgeInsets.only(bottom: 14),
+      color: colorScheme.primaryContainer.withValues(alpha: 0.34),
       child: Padding(
-        padding: const EdgeInsets.all(16.0),
+        padding: const EdgeInsets.all(18.0),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Row(
               children: [
-                Icon(Icons.dns, color: Theme.of(context).colorScheme.primary),
-                const SizedBox(width: 8),
-                Text(
-                  tr('summary'),
-                  style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                    fontWeight: FontWeight.bold,
+                Container(
+                  width: 42,
+                  height: 42,
+                  decoration: BoxDecoration(
+                    color: colorScheme.primary,
+                    borderRadius: BorderRadius.circular(14),
+                  ),
+                  child: Icon(Icons.dns, color: colorScheme.onPrimary),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Text(
+                    tr('summary'),
+                    style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                      fontWeight: FontWeight.w800,
+                    ),
                   ),
                 ),
               ],
             ),
-            const SizedBox(height: 12),
+            const SizedBox(height: 16),
             // Server counts
             Row(
-              mainAxisAlignment: MainAxisAlignment.spaceAround,
               children: [
                 _buildStatItem(
                   context,
                   tr('total'),
                   totalServers.toString(),
-                  Colors.blue,
+                  colorScheme.primary,
                 ),
+                const SizedBox(width: 10),
                 _buildStatItem(
                   context,
                   tr('online'),
                   onlineServers.toString(),
                   Colors.green,
                 ),
+                const SizedBox(width: 10),
                 _buildStatItem(
                   context,
                   tr('offline'),
@@ -427,32 +441,20 @@ class _DashboardScreenState extends State<DashboardScreen> {
                 ),
               ],
             ),
-            const SizedBox(height: 12),
-            const Divider(),
-            const SizedBox(height: 8),
+            const SizedBox(height: 16),
             // Network stats
-            Row(
-              children: [
-                const Icon(Icons.network_check, size: 18),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: Text(
-                    '${tr('bandwidth')}: ${formatBytes(totalBandwidth)}/s',
-                  ),
-                ),
-              ],
+            _buildSummaryInfo(
+              context,
+              Icons.network_check,
+              tr('bandwidth'),
+              '${formatBytes(totalBandwidth)}/s',
             ),
-            const SizedBox(height: 4),
-            Row(
-              children: [
-                const Icon(Icons.data_usage, size: 18),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: Text(
-                    '${tr('traffic')}: ↑${formatBytes(totalSent.toDouble())} / ↓${formatBytes(totalRecv.toDouble())}',
-                  ),
-                ),
-              ],
+            const SizedBox(height: 8),
+            _buildSummaryInfo(
+              context,
+              Icons.data_usage,
+              tr('traffic'),
+              '↑${formatBytes(totalSent.toDouble())} / ↓${formatBytes(totalRecv.toDouble())}',
             ),
           ],
         ),
@@ -466,17 +468,70 @@ class _DashboardScreenState extends State<DashboardScreen> {
     String value,
     Color color,
   ) {
-    return Column(
-      children: [
-        Text(
-          value,
-          style: Theme.of(context).textTheme.headlineSmall?.copyWith(
-            fontWeight: FontWeight.bold,
-            color: color,
-          ),
+    final colorScheme = Theme.of(context).colorScheme;
+    return Expanded(
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+        decoration: BoxDecoration(
+          color: color.withValues(alpha: 0.12),
+          borderRadius: BorderRadius.circular(14),
+          border: Border.all(color: color.withValues(alpha: 0.24)),
         ),
-        Text(label, style: Theme.of(context).textTheme.bodySmall),
-      ],
+        child: Column(
+          children: [
+            Text(
+              value,
+              style: Theme.of(context).textTheme.titleLarge?.copyWith(
+                fontWeight: FontWeight.w800,
+                color: color,
+              ),
+            ),
+            Text(
+              label,
+              style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                color: colorScheme.onSurfaceVariant,
+              ),
+              overflow: TextOverflow.ellipsis,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildSummaryInfo(
+    BuildContext context,
+    IconData icon,
+    String label,
+    String value,
+  ) {
+    final colorScheme = Theme.of(context).colorScheme;
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      decoration: BoxDecoration(
+        color: colorScheme.surface.withValues(alpha: 0.62),
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: colorScheme.outlineVariant),
+      ),
+      child: Row(
+        children: [
+          Icon(icon, size: 18, color: colorScheme.primary),
+          const SizedBox(width: 10),
+          Text(
+            '$label:',
+            style: TextStyle(color: colorScheme.onSurfaceVariant),
+          ),
+          const SizedBox(width: 6),
+          Expanded(
+            child: Text(
+              value,
+              style: const TextStyle(fontWeight: FontWeight.w700),
+              overflow: TextOverflow.ellipsis,
+              textAlign: TextAlign.end,
+            ),
+          ),
+        ],
+      ),
     );
   }
 
@@ -556,8 +611,11 @@ class _DashboardScreenState extends State<DashboardScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
     return Scaffold(
+      backgroundColor: colorScheme.surface,
       appBar: AppBar(
+        backgroundColor: colorScheme.surface.withValues(alpha: 0.92),
         title: Text(tr('dashboard')),
         actions: [
           IconButton(
@@ -765,50 +823,66 @@ class _DashboardScreenState extends State<DashboardScreen> {
           ),
         ],
       ),
-      body: _isLoading
-          ? const Center(child: CircularProgressIndicator())
-          : _isOffline
-          ? _buildOfflineWidget()
-          : _error != null
-          ? Center(
-              child: Text(_error!, style: const TextStyle(color: Colors.red)),
-            )
-          : RefreshIndicator(
-              onRefresh: _fetchSystems,
-              child: Builder(
-                builder: (context) {
-                  final isDetailed = Provider.of<AppProvider>(
-                    context,
-                  ).isDetailed;
-                  // In detailed mode, add summary card at index 0
-                  final itemCount = isDetailed
-                      ? _systems.length + 1
-                      : _systems.length;
+      body: DecoratedBox(
+        decoration: BoxDecoration(
+          gradient: LinearGradient(
+            begin: Alignment.topCenter,
+            end: Alignment.bottomCenter,
+            colors: [
+              colorScheme.primaryContainer.withValues(alpha: 0.18),
+              colorScheme.surface,
+              colorScheme.surface,
+            ],
+          ),
+        ),
+        child: _isLoading
+            ? const Center(child: CircularProgressIndicator())
+            : _isOffline
+            ? _buildOfflineWidget()
+            : _error != null
+            ? Center(
+                child: Text(
+                  _error!,
+                  style: TextStyle(color: colorScheme.error),
+                ),
+              )
+            : RefreshIndicator(
+                onRefresh: _fetchSystems,
+                child: Builder(
+                  builder: (context) {
+                    final isDetailed = Provider.of<AppProvider>(
+                      context,
+                    ).isDetailed;
+                    // In detailed mode, add summary card at index 0
+                    final itemCount = isDetailed
+                        ? _systems.length + 1
+                        : _systems.length;
 
-                  return ListView.builder(
-                    padding: const EdgeInsets.all(8.0),
-                    physics: const AlwaysScrollableScrollPhysics(),
-                    itemCount: itemCount,
-                    itemBuilder: (context, index) {
-                      // Show summary card at index 0 in detailed mode
-                      if (isDetailed && index == 0) {
-                        return _buildSummaryCard(context);
-                      }
+                    return ListView.builder(
+                      padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
+                      physics: const AlwaysScrollableScrollPhysics(),
+                      itemCount: itemCount,
+                      itemBuilder: (context, index) {
+                        // Show summary card at index 0 in detailed mode
+                        if (isDetailed && index == 0) {
+                          return _buildSummaryCard(context);
+                        }
 
-                      // Adjust index for systems list
-                      final sysIndex = isDetailed ? index - 1 : index;
-                      final system = _systems[sysIndex];
-                      final traffic = _cumulativeTraffic[system.id];
-                      return _SystemCard(
-                        system: system,
-                        isDetailed: isDetailed,
-                        cumulativeTraffic: traffic,
-                      );
-                    },
-                  );
-                },
+                        // Adjust index for systems list
+                        final sysIndex = isDetailed ? index - 1 : index;
+                        final system = _systems[sysIndex];
+                        final traffic = _cumulativeTraffic[system.id];
+                        return _SystemCard(
+                          system: system,
+                          isDetailed: isDetailed,
+                          cumulativeTraffic: traffic,
+                        );
+                      },
+                    );
+                  },
+                ),
               ),
-            ),
+      ),
     );
   }
 }
@@ -900,14 +974,14 @@ class _SystemCard extends StatelessWidget {
       // Note: info['b'] is not set by agent, so we use 'bb' which is bytesSentPerSec + bytesRecvPerSec
       if (system.info['bb'] != null && system.info['bb'] is num) {
         final bb = (system.info['bb'] as num).toDouble();
-        network = _formatBytes(bb) + '/s';
+        network = '${_formatBytes(bb)}/s';
       }
 
       // Services (sv: [total, failed])
       int serviceFailed = 0;
       if (system.info['sv'] != null) {
         final sv = system.info['sv'];
-        if (sv is List && sv.length >= 1) {
+        if (sv is List && sv.isNotEmpty) {
           serviceTotal = (sv[0] is num) ? (sv[0] as num).toInt() : 0;
           serviceFailed = (sv.length > 1 && sv[1] is num)
               ? (sv[1] as num).toInt()
@@ -941,9 +1015,9 @@ class _SystemCard extends StatelessWidget {
     }
 
     return Card(
-      margin: const EdgeInsets.symmetric(vertical: 6, horizontal: 8),
-      elevation: 2,
+      margin: const EdgeInsets.only(bottom: 14),
       child: InkWell(
+        borderRadius: BorderRadius.circular(18),
         onTap: () {
           Navigator.of(context).push(
             MaterialPageRoute(
@@ -986,7 +1060,7 @@ class _SystemCard extends StatelessWidget {
           );
         },
         child: Padding(
-          padding: const EdgeInsets.all(16.0),
+          padding: const EdgeInsets.all(18.0),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
@@ -1012,18 +1086,38 @@ class _SystemCard extends StatelessWidget {
                 system.diskPercent,
                 Icons.donut_large,
               ),
-              const SizedBox(height: 12),
-              _buildInfoRow(Icons.speed, tr('load'), load),
+              const SizedBox(height: 8),
+              if (system.gpuPercent != null) ...[
+                _buildProgressBar(
+                  context,
+                  'GPU',
+                  system.gpuPercent!,
+                  Icons.graphic_eq,
+                ),
+                const SizedBox(height: 8),
+              ],
+              _buildInfoRow(context, Icons.speed, tr('load'), load),
               const SizedBox(height: 4),
-              _buildInfoRow(Icons.network_check, tr('network'), network),
+              _buildInfoRow(
+                context,
+                Icons.network_check,
+                tr('network'),
+                network,
+              ),
               const SizedBox(height: 4),
-              _buildInfoRow(Icons.data_usage, tr('traffic'), totalTraffic),
+              _buildInfoRow(
+                context,
+                Icons.data_usage,
+                tr('traffic'),
+                totalTraffic,
+              ),
               const SizedBox(height: 4),
-              _buildInfoRow(Icons.schedule, tr('uptime'), uptime),
+              _buildInfoRow(context, Icons.schedule, tr('uptime'), uptime),
               // Only show services row if there are services (non-Docker agent)
               if (serviceTotal > 0) ...[
                 const SizedBox(height: 4),
                 _buildInfoRow(
+                  context,
                   Icons.miscellaneous_services,
                   tr('services'),
                   services,
@@ -1038,9 +1132,9 @@ class _SystemCard extends StatelessWidget {
 
   Widget _buildSimpleCard(BuildContext context) {
     return Card(
-      margin: const EdgeInsets.symmetric(vertical: 6, horizontal: 8),
-      elevation: 2,
+      margin: const EdgeInsets.only(bottom: 14),
       child: InkWell(
+        borderRadius: BorderRadius.circular(18),
         onTap: () {
           Navigator.of(context).push(
             MaterialPageRoute(
@@ -1049,7 +1143,7 @@ class _SystemCard extends StatelessWidget {
           );
         },
         child: Padding(
-          padding: const EdgeInsets.all(16.0),
+          padding: const EdgeInsets.all(18.0),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
@@ -1059,12 +1153,13 @@ class _SystemCard extends StatelessWidget {
                 system.host,
                 style: TextStyle(color: Colors.grey[600], fontSize: 13),
               ),
-              const Divider(height: 24),
+              const SizedBox(height: 18),
               Row(
-                mainAxisAlignment: MainAxisAlignment.spaceAround,
                 children: [
                   _buildStat(tr('cpu'), system.cpuPercent, Icons.memory),
+                  const SizedBox(width: 10),
                   _buildStat(tr('ram'), system.memoryPercent, Icons.storage),
+                  const SizedBox(width: 10),
                   _buildStat(tr('disk'), system.diskPercent, Icons.donut_large),
                 ],
               ),
@@ -1076,6 +1171,7 @@ class _SystemCard extends StatelessWidget {
   }
 
   Widget _buildHeader({required bool detailed}) {
+    final statusColor = system.status == 'up' ? Colors.green : Colors.red;
     return Row(
       mainAxisAlignment: MainAxisAlignment.spaceBetween,
       children: [
@@ -1084,23 +1180,22 @@ class _SystemCard extends StatelessWidget {
         Expanded(
           child: Text(
             system.name,
-            style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+            style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w800),
             overflow: TextOverflow.ellipsis,
           ),
         ),
         Container(
           padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
           decoration: BoxDecoration(
-            color: system.status == 'up'
-                ? Colors.green.withOpacity(0.2)
-                : Colors.red.withOpacity(0.2),
-            borderRadius: BorderRadius.circular(4),
+            color: statusColor.withValues(alpha: 0.14),
+            borderRadius: BorderRadius.circular(999),
+            border: Border.all(color: statusColor.withValues(alpha: 0.26)),
           ),
           child: Text(
             system.status.toUpperCase(),
             style: TextStyle(
-              color: system.status == 'up' ? Colors.green : Colors.red,
-              fontWeight: FontWeight.bold,
+              color: statusColor,
+              fontWeight: FontWeight.w800,
               fontSize: 12,
             ),
           ),
@@ -1116,26 +1211,27 @@ class _SystemCard extends StatelessWidget {
     IconData icon,
   ) {
     final color = _getStatusColor(value);
+    final colorScheme = Theme.of(context).colorScheme;
     return Row(
       children: [
         SizedBox(
           width: 80,
           child: Row(
             children: [
-              Icon(icon, size: 16, color: Colors.grey),
+              Icon(icon, size: 16, color: colorScheme.onSurfaceVariant),
               const SizedBox(width: 4),
-              Text(label, style: const TextStyle(fontWeight: FontWeight.bold)),
+              Text(label, style: const TextStyle(fontWeight: FontWeight.w700)),
             ],
           ),
         ),
         Expanded(
           child: ClipRRect(
-            borderRadius: BorderRadius.circular(4),
+            borderRadius: BorderRadius.circular(999),
             child: LinearProgressIndicator(
               value: value / 100,
               color: color,
-              backgroundColor: Colors.grey.withOpacity(0.2),
-              minHeight: 8,
+              backgroundColor: colorScheme.surfaceContainerHighest,
+              minHeight: 10,
             ),
           ),
         ),
@@ -1151,28 +1247,60 @@ class _SystemCard extends StatelessWidget {
     );
   }
 
-  Widget _buildInfoRow(IconData icon, String label, String value) {
+  Widget _buildInfoRow(
+    BuildContext context,
+    IconData icon,
+    String label,
+    String value,
+  ) {
+    final colorScheme = Theme.of(context).colorScheme;
     return Row(
       children: [
-        Icon(icon, size: 16, color: Colors.grey),
+        Icon(icon, size: 16, color: colorScheme.onSurfaceVariant),
         const SizedBox(width: 8),
-        Text('$label: ', style: const TextStyle(color: Colors.grey)),
-        Text(value, style: const TextStyle(fontWeight: FontWeight.bold)),
+        Text('$label: ', style: TextStyle(color: colorScheme.onSurfaceVariant)),
+        Expanded(
+          child: Text(
+            value,
+            style: const TextStyle(fontWeight: FontWeight.w700),
+            overflow: TextOverflow.ellipsis,
+            textAlign: TextAlign.end,
+          ),
+        ),
       ],
     );
   }
 
   Widget _buildStat(String label, double value, IconData icon) {
-    return Column(
-      children: [
-        Icon(icon, color: _getStatusColor(value), size: 24),
-        const SizedBox(height: 4),
-        Text(
-          '${value.toStringAsFixed(1)}%',
-          style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
+    final color = _getStatusColor(value);
+    return Expanded(
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 12),
+        decoration: BoxDecoration(
+          color: color.withValues(alpha: 0.10),
+          borderRadius: BorderRadius.circular(14),
+          border: Border.all(color: color.withValues(alpha: 0.22)),
         ),
-        Text(label, style: const TextStyle(fontSize: 12, color: Colors.grey)),
-      ],
+        child: Column(
+          children: [
+            Icon(icon, color: color, size: 24),
+            const SizedBox(height: 6),
+            Text(
+              '${value.toStringAsFixed(1)}%',
+              style: TextStyle(
+                color: color,
+                fontWeight: FontWeight.w800,
+                fontSize: 16,
+              ),
+            ),
+            Text(
+              label,
+              style: const TextStyle(fontSize: 12),
+              overflow: TextOverflow.ellipsis,
+            ),
+          ],
+        ),
+      ),
     );
   }
 }

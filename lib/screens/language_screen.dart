@@ -11,6 +11,7 @@ class LanguageScreen extends StatelessWidget {
 
     final prefs = await SharedPreferences.getInstance();
     await prefs.setBool('is_first_run', false);
+    if (!context.mounted) return;
 
     Navigator.of(
       context,

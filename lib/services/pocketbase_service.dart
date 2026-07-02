@@ -36,4 +36,18 @@ class PocketBaseService {
 
     _pb = PocketBase(url, authStore: store);
   }
+
+  /// Fetch system details from the 'system_details' collection.
+  /// Returns a map of the record fields or null if not found.
+  Future<Map<String, dynamic>?> fetchSystemDetails(String systemId) async {
+    final pb = this.pb;
+    // Query the system_details collection for the record belonging to the given system.
+    final result = await pb
+        .collection('system_details')
+        .getList(page: 1, perPage: 1, filter: 'id = "$systemId"');
+    if (result.items.isNotEmpty) {
+      return result.items.first.data;
+    }
+    return null;
+  }
 }

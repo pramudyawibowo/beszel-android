@@ -79,10 +79,14 @@ class _AlertsScreenState extends State<AlertsScreen> {
               itemCount: _alerts.length,
               itemBuilder: (context, index) {
                 final alert = _alerts[index];
-                final date = DateTime.fromMillisecondsSinceEpoch(alert.timestamp);
+                final date = DateTime.fromMillisecondsSinceEpoch(
+                  alert.timestamp,
+                );
                 return Card(
-                  margin:
-                      const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                  margin: const EdgeInsets.symmetric(
+                    horizontal: 16,
+                    vertical: 8,
+                  ),
                   child: ListTile(
                     leading: Icon(
                       _getTypeIcon(alert.type),

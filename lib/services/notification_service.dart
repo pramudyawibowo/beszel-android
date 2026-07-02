@@ -19,25 +19,25 @@ class NotificationService {
     // iOS settings
     const DarwinInitializationSettings initializationSettingsDarwin =
         DarwinInitializationSettings(
-      requestSoundPermission: true,
-      requestBadgePermission: true,
-      requestAlertPermission: true,
-    );
+          requestSoundPermission: true,
+          requestBadgePermission: true,
+          requestAlertPermission: true,
+        );
 
-    const InitializationSettings initializationSettings = InitializationSettings(
-      android: initializationSettingsAndroid,
-      iOS: initializationSettingsDarwin,
-      macOS: initializationSettingsDarwin,
-    );
+    const InitializationSettings initializationSettings =
+        InitializationSettings(
+          android: initializationSettingsAndroid,
+          iOS: initializationSettingsDarwin,
+          macOS: initializationSettingsDarwin,
+        );
 
-    await flutterLocalNotificationsPlugin.initialize(
-      initializationSettings,
-    );
-    
+    await flutterLocalNotificationsPlugin.initialize(initializationSettings);
+
     // Request permissions for Android 13+
     await flutterLocalNotificationsPlugin
         .resolvePlatformSpecificImplementation<
-            AndroidFlutterLocalNotificationsPlugin>()
+          AndroidFlutterLocalNotificationsPlugin
+        >()
         ?.requestNotificationsPermission();
   }
 
@@ -48,17 +48,18 @@ class NotificationService {
   }) async {
     const AndroidNotificationDetails androidNotificationDetails =
         AndroidNotificationDetails(
-      'beszel_alerts_v2', // channelId
-      'Beszel Alerts', // channelName
-      channelDescription: 'Notifications for system alerts',
-      importance: Importance.max,
-      priority: Priority.high,
-      ticker: 'ticker',
-      sound: RawResourceAndroidNotificationSound('alert'),
-    );
+          'beszel_alerts_v2', // channelId
+          'Beszel Alerts', // channelName
+          channelDescription: 'Notifications for system alerts',
+          importance: Importance.max,
+          priority: Priority.high,
+          ticker: 'ticker',
+          sound: RawResourceAndroidNotificationSound('alert'),
+        );
 
-    const NotificationDetails notificationDetails =
-        NotificationDetails(android: androidNotificationDetails);
+    const NotificationDetails notificationDetails = NotificationDetails(
+      android: androidNotificationDetails,
+    );
 
     await flutterLocalNotificationsPlugin.show(
       id,
