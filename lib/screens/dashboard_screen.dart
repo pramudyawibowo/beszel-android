@@ -28,11 +28,15 @@ class DashboardScreen extends StatefulWidget {
 class _DashboardScreenState extends State<DashboardScreen> {
   List<System> _systems = [];
   Map<String, List<int>> _cumulativeTraffic = {}; // systemId -> [sent, recv]
+  Map<String, bool> _systemsWithGpu = {}; // systemId -> has GPU data
   bool _isLoading = true;
   bool _isOffline = false;
   String? _error;
   SortOption _currentSort = SortOption.name; // Default sort
   Timer? _pollingTimer;
+  int _pollIntervalSeconds = 5;
+  bool _pollInProgress = false;
+  bool _initialLoadStarted = false;
 
   void _sortSystems() {
     switch (_currentSort) {
@@ -56,23 +60,48 @@ class _DashboardScreenState extends State<DashboardScreen> {
   void initState() {
     super.initState();
     debugPrint('Dashboard: initState');
+  }
 
-    // Defer heavy services until after the first frame rendered
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      debugPrint('Dashboard: PostFrameCallback - Starting Services');
-      NotificationService().initialize();
-      AlertManager().loadAlerts();
-      _fetchSystems();
-      _subscribeToRealtime();
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
 
-      // Polling fallback: every 5 seconds
-      _pollingTimer = Timer.periodic(const Duration(seconds: 5), (timer) {
-        _pollSystems();
+    final intervalSeconds = context.watch<AppProvider>().refreshIntervalSeconds;
+    if (_pollIntervalSeconds != intervalSeconds) {
+      _pollIntervalSeconds = intervalSeconds;
+      _restartPollingTimer();
+    }
+
+    if (!_initialLoadStarted) {
+      _initialLoadStarted = true;
+      // Defer heavy services until after the first frame rendered
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        debugPrint('Dashboard: PostFrameCallback - Starting Services');
+        NotificationService().initialize();
+        AlertManager().loadAlerts();
+        _fetchSystems();
+        _subscribeToRealtime();
+        _restartPollingTimer();
       });
-    });
+    }
+  }
+
+  void _restartPollingTimer() {
+    _pollingTimer?.cancel();
+    if (_pollIntervalSeconds <= 0) {
+      return;
+    }
+    _pollingTimer = Timer.periodic(
+      Duration(seconds: _pollIntervalSeconds),
+      (timer) {
+        _pollSystems();
+      },
+    );
   }
 
   Future<void> _pollSystems() async {
+    if (_pollInProgress) return;
+    _pollInProgress = true;
     // Silent fetch
     try {
       final pb = PocketBaseService().pb;
@@ -95,7 +124,10 @@ class _DashboardScreenState extends State<DashboardScreen> {
         }
         _sortSystems();
       });
-    } catch (_) {}
+    } catch (_) {
+    } finally {
+      _pollInProgress = false;
+    }
   }
 
   void _checkAlerts(System oldSystem, System newSystem) {
@@ -263,6 +295,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
     try {
       final pb = PocketBaseService().pb;
       final Map<String, List<int>> trafficMap = {};
+      final Map<String, bool> gpuMap = {};
 
       for (final system in _systems) {
         try {
@@ -298,6 +331,14 @@ class _DashboardScreenState extends State<DashboardScreen> {
                 trafficMap[system.id] = [totalSent, totalRecv];
               }
             }
+
+            // Detect whether this system has GPU data at all.
+            // GPU utilization can legitimately be 0, so presence is based on
+            // whether the stats payload includes a non-empty GPU map.
+            if (stats != null && stats['g'] is Map) {
+              final gpus = stats['g'] as Map;
+              gpuMap[system.id] = gpus.isNotEmpty;
+            }
           }
         } catch (e) {
           debugPrint('Failed to fetch stats for ${system.name}: $e');
@@ -307,6 +348,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
       if (mounted) {
         setState(() {
           _cumulativeTraffic = trafficMap;
+          _systemsWithGpu = gpuMap;
         });
       }
     } catch (e) {
@@ -569,9 +611,44 @@ class _DashboardScreenState extends State<DashboardScreen> {
           });
         }
       });
+
+      pb.collection('system_stats').subscribe('*', (e) {
+        if (!mounted || e.action != 'create') return;
+
+        final record = e.record;
+        final systemId = record?.data['system']?.toString();
+        final stats = record?.data['stats'];
+        if (systemId == null || stats is! Map) return;
+
+        final newTraffic = _extractTrafficTotals(stats);
+        final hasGpu = (stats['g'] is Map) && (stats['g'] as Map).isNotEmpty;
+
+        setState(() {
+          if (newTraffic != null) {
+            _cumulativeTraffic[systemId] = newTraffic;
+          }
+          _systemsWithGpu[systemId] = hasGpu;
+        });
+      });
     } catch (e) {
       debugPrint('Realtime subscription failed: $e');
     }
+  }
+
+  List<int>? _extractTrafficTotals(Map stats) {
+    final ni = stats['ni'];
+    if (ni is! Map) return null;
+
+    int totalSent = 0;
+    int totalRecv = 0;
+    ni.forEach((key, value) {
+      if (value is List && value.length >= 4) {
+        totalSent += ((value[2] is num) ? (value[2] as num).toInt() : 0);
+        totalRecv += ((value[3] is num) ? (value[3] as num).toInt() : 0);
+      }
+    });
+
+    return [totalSent, totalRecv];
   }
 
   void _triggerAlert(System system, String title, String body, String type) {
@@ -590,6 +667,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
     try {
       final pb = PocketBaseService().pb;
       await pb.collection('systems').unsubscribe('*');
+      await pb.collection('system_stats').unsubscribe('*');
     } catch (_) {}
   }
 
@@ -872,10 +950,13 @@ class _DashboardScreenState extends State<DashboardScreen> {
                         final sysIndex = isDetailed ? index - 1 : index;
                         final system = _systems[sysIndex];
                         final traffic = _cumulativeTraffic[system.id];
+                        final hasGpu =
+                            _systemsWithGpu[system.id] ?? system.gpuPercent != null;
                         return _SystemCard(
                           system: system,
                           isDetailed: isDetailed,
                           cumulativeTraffic: traffic,
+                          hasGpu: hasGpu,
                         );
                       },
                     );
@@ -891,11 +972,13 @@ class _SystemCard extends StatelessWidget {
   final System system;
   final bool isDetailed;
   final List<int>? cumulativeTraffic; // [sent, recv]
+  final bool hasGpu;
 
   const _SystemCard({
     required this.system,
     this.isDetailed = false,
     this.cumulativeTraffic,
+    this.hasGpu = false,
   });
 
   String _formatBytes(double bytes) {
@@ -1087,11 +1170,11 @@ class _SystemCard extends StatelessWidget {
                 Icons.donut_large,
               ),
               const SizedBox(height: 8),
-              if (system.gpuPercent != null) ...[
+              if (hasGpu) ...[
                 _buildProgressBar(
                   context,
                   'GPU',
-                  system.gpuPercent!,
+                  system.gpuPercent ?? 0.0,
                   Icons.graphic_eq,
                 ),
                 const SizedBox(height: 8),

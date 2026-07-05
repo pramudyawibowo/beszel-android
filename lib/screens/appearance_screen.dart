@@ -40,26 +40,61 @@ class AppearanceScreen extends StatelessWidget {
               style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
               textAlign: TextAlign.center,
             ),
-            const SizedBox(height: 32),
+            const SizedBox(height: 24),
             Expanded(
               child: Consumer<AppProvider>(
                 builder: (context, provider, _) {
-                  return Column(
+                  return ListView(
                     children: [
-                      _buildOption(
+                      _buildSectionCard(
                         context,
-                        title: 'view_simple'.tr(),
-                        icon: Icons.view_agenda_outlined,
-                        isSelected: !provider.isDetailed,
-                        onTap: () => provider.setDetailedMode(false),
+                        title: 'choose_view_mode'.tr(),
+                        child: Column(
+                          children: [
+                            _buildOption(
+                              context,
+                              title: 'view_simple'.tr(),
+                              icon: Icons.view_agenda_outlined,
+                              isSelected: !provider.isDetailed,
+                              onTap: () => provider.setDetailedMode(false),
+                            ),
+                            const SizedBox(height: 16),
+                            _buildOption(
+                              context,
+                              title: 'view_detailed'.tr(),
+                              icon: Icons.view_list,
+                              isSelected: provider.isDetailed,
+                              onTap: () => provider.setDetailedMode(true),
+                            ),
+                          ],
+                        ),
                       ),
                       const SizedBox(height: 16),
-                      _buildOption(
+                      _buildSectionCard(
                         context,
-                        title: 'view_detailed'.tr(),
-                        icon: Icons.view_list, // detailed icon
-                        isSelected: provider.isDetailed,
-                        onTap: () => provider.setDetailedMode(true),
+                        title: 'refresh_interval'.tr(),
+                        child: DropdownButtonFormField<int>(
+                          value: provider.refreshIntervalSeconds,
+                          decoration: InputDecoration(
+                            labelText: 'refresh_every'.tr(),
+                          ),
+                          isExpanded: true,
+                          items: [1, 2, 5, 10, 30]
+                              .map(
+                                (seconds) => DropdownMenuItem<int>(
+                                  value: seconds,
+                                  child: Text(
+                                    '$seconds ${tr('seconds')}',
+                                  ),
+                                ),
+                              )
+                              .toList(),
+                          onChanged: (value) {
+                            if (value != null) {
+                              provider.setRefreshIntervalSeconds(value);
+                            }
+                          },
+                        ),
                       ),
                     ],
                   );
@@ -75,6 +110,32 @@ class AppearanceScreen extends StatelessWidget {
             ),
           ],
         ),
+      ),
+    );
+  }
+
+  Widget _buildSectionCard(
+    BuildContext context, {
+    required String title,
+    required Widget child,
+  }) {
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: Theme.of(context).colorScheme.surfaceContainerLowest,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: Theme.of(context).colorScheme.outlineVariant),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            title,
+            style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700),
+          ),
+          const SizedBox(height: 16),
+          child,
+        ],
       ),
     );
   }

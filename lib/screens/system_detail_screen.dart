@@ -1,8 +1,11 @@
+import 'dart:async';
+
 import 'package:beszel_pro/models/system.dart';
 import 'package:beszel_pro/services/pocketbase_service.dart';
-import 'package:fl_chart/fl_chart.dart';
 import 'package:flutter/material.dart';
 import 'package:easy_localization/easy_localization.dart';
+import 'package:pocketbase/pocketbase.dart';
+import 'package:fl_chart/fl_chart.dart';
 import 'package:beszel_pro/screens/system_details_screen.dart';
 
 class SystemDetailScreen extends StatefulWidget {
@@ -33,6 +36,20 @@ class _SystemDetailScreenState extends State<SystemDetailScreen> {
   // Per-core CPU usage
   List<int> _cpuCoresUsage = [];
 
+  // Containers and systemd services
+  List<Map<String, dynamic>> _containers = [];
+  List<Map<String, dynamic>> _systemdServices = [];
+  bool _containersLoading = true;
+  bool _systemdLoading = true;
+  String _chartTime = '1h';
+  bool _chartLoading = true;
+  int _chartLoadRequestId = 0;
+  Future<void> Function()? _rtMetricsUnsubscribe;
+  Timer? _realtimeWatchdog;
+  bool _rtMetricsHealthy = false;
+  int _realtimeReconnectAttempts = 0;
+  DateTime? _lastRealtimeEventAt;
+
   bool _isLoading = true;
   // System details from PocketBase (hostname, OS, etc.)
   Map<String, dynamic>? _systemDetails;
@@ -40,166 +57,334 @@ class _SystemDetailScreenState extends State<SystemDetailScreen> {
   @override
   void initState() {
     super.initState();
-    _fetchHistory();
+    _fetchHistory(requestId: _chartLoadRequestId);
     _fetchSystemDetails();
+    _fetchContainers();
+    _fetchSystemdServices();
     _subscribeToRealtime();
   }
 
   @override
   void dispose() {
     _unsubscribeFromRealtime();
+    _realtimeWatchdog?.cancel();
     super.dispose();
   }
 
   Future<void> _subscribeToRealtime() async {
     try {
       final pb = PocketBaseService().pb;
-      await pb.collection('systems').subscribe(widget.system.id, (e) {
-        if (!mounted) return;
-        if (e.action == 'update') {
-          final updatedSystem = System.fromRecord(e.record!);
-          final now = DateTime.now().millisecondsSinceEpoch.toDouble();
-
-          setState(() {
-            _addSpot(_cpuSpots, now, updatedSystem.cpuPercent);
-            _addSpot(_ramSpots, now, updatedSystem.memoryPercent);
-            _addSpot(_diskSpots, now, updatedSystem.diskPercent);
-
-            // Update network from info['bb']
-            if (updatedSystem.info['bb'] != null &&
-                updatedSystem.info['bb'] is num) {
-              _addSpot(
-                _netSpots,
-                now,
-                (updatedSystem.info['bb'] as num).toDouble() / 1024,
-              ); // KB/s
-            }
-          });
-        }
-      });
-
-      // Also subscribe to system_stats for detailed data
-      await pb.collection('system_stats').subscribe('*', (e) {
-        if (!mounted) return;
-        if (e.action == 'create' &&
-            e.record?.data['system'] == widget.system.id) {
-          final stats = e.record?.data['stats'];
-          if (stats != null) {
-            setState(() {
-              _latestStats = stats;
-              // Update per-core CPU usage (support both "cpus" and "c")
-              List<dynamic>? coreList;
-              if (stats['cpus'] != null && stats['cpus'] is List) {
-                coreList = stats['cpus'] as List;
-              } else if (stats['c'] != null) {
-                if (stats['c'] is List) {
-                  coreList = stats['c'] as List;
-                } else if (stats['c'] is num) {
-                  // Server sent just a count, create placeholder list of zeros
-                  int count = (stats['c'] as num).toInt();
-                  coreList = List.filled(count, 0);
-                }
-              }
-              if (coreList != null) {
-                _cpuCoresUsage = coreList
-                    .map((v) => (v is num) ? v.toInt() : 0)
-                    .toList();
-              }
-              // Update GPU metrics (power, utilization, VRAM)
-              double gpuPowerTotal = 0;
-              double gpuUtilTotal = 0;
-              int gpuCount = 0;
-              double gpuVramUsed = 0;
-              if (stats['g'] != null && stats['g'] is Map) {
-                final gpus = stats['g'] as Map;
-                gpus.forEach((key, value) {
-                  if (value is Map) {
-                    if (value['p'] != null && value['p'] is num) {
-                      gpuPowerTotal += (value['p'] as num).toDouble();
-                    }
-                    if (value['u'] != null && value['u'] is num) {
-                      gpuUtilTotal += (value['u'] as num).toDouble();
-                      gpuCount++;
-                    }
-                    if (value['mu'] != null && value['mu'] is num) {
-                      gpuVramUsed += (value['mu'] as num).toDouble();
-                    }
-                  }
-                });
-              }
-              final now = DateTime.now().millisecondsSinceEpoch.toDouble();
-              _addSpot(_gpuPowerSpots, now, gpuPowerTotal);
-              if (gpuCount > 0) {
-                _addSpot(_gpuUtilSpots, now, gpuUtilTotal / gpuCount);
-              }
-              // VRAM usage spot (MB; chart will display in GB)
-              if (gpuVramUsed > 0) {
-                const double _mbPerGB = 1024;
-                _addSpot(_gpuVramSpots, now, gpuVramUsed / _mbPerGB);
-              }
-            });
-          }
-        }
-      });
+      await _subscribeSystemStats(pb);
+      await _subscribeRtMetrics(pb);
     } catch (e) {
       debugPrint('Subscription failed: $e');
+      _rtMetricsHealthy = false;
     }
   }
 
   Future<void> _unsubscribeFromRealtime() async {
     try {
+      await _rtMetricsUnsubscribe?.call();
       final pb = PocketBaseService().pb;
-      await pb.collection('systems').unsubscribe(widget.system.id);
       await pb.collection('system_stats').unsubscribe('*');
     } catch (_) {}
   }
 
+  Future<void> _subscribeSystemStats(PocketBase pb) async {
+    await pb.collection('system_stats').subscribe(
+      '*',
+      (e) {
+        if (!mounted || e.action != 'create') return;
+        if (e.record?.data['system'] != widget.system.id) return;
+        final stats = e.record?.data['stats'];
+        if (stats is! Map) return;
+
+        final activeType = _currentChartType;
+        final recordType = e.record?.data['type']?.toString();
+        if (_chartLoading) return;
+        if (_chartTime == '1m') {
+          if (!_rtMetricsHealthy) {
+            setState(() {
+              _appendStatsSnapshot(
+                stats.cast<String, dynamic>(),
+                e.record?.created,
+              );
+            });
+          }
+          return;
+        }
+
+        if (recordType == activeType) {
+          setState(() {
+            _appendStatsSnapshot(
+              stats.cast<String, dynamic>(),
+              e.record?.created,
+            );
+          });
+        }
+      },
+      filter: 'system = "${widget.system.id}"',
+    );
+  }
+
+  Future<void> _subscribeRtMetrics(PocketBase pb) async {
+    _rtMetricsHealthy = true;
+    _realtimeReconnectAttempts = 0;
+    _lastRealtimeEventAt = DateTime.now();
+    _realtimeWatchdog?.cancel();
+    _realtimeWatchdog = Timer.periodic(const Duration(seconds: 3), (_) {
+      _checkRealtimeHealth();
+    });
+
+    _rtMetricsUnsubscribe = await pb.realtime.subscribe(
+      'rt_metrics',
+      (e) {
+        if (!mounted) return;
+        final payload = e.jsonData();
+        final stats = payload['stats'];
+        if (stats is! Map) {
+          return;
+        }
+
+        _lastRealtimeEventAt = DateTime.now();
+        _rtMetricsHealthy = true;
+        _realtimeReconnectAttempts = 0;
+        if (_chartTime != '1m' || _chartLoading) {
+          return;
+        }
+        setState(() {
+          _latestStats = stats.cast<String, dynamic>();
+          _appendStatsSnapshot(
+            stats.cast<String, dynamic>(),
+            DateTime.now().toIso8601String(),
+          );
+        });
+      },
+      query: {'system': widget.system.id},
+    );
+  }
+
+  Future<void> _checkRealtimeHealth() async {
+    if (!mounted || !_rtMetricsHealthy) return;
+    final last = _lastRealtimeEventAt;
+    if (last == null) return;
+
+    final stale = DateTime.now().difference(last).inSeconds >= 5;
+    if (!stale) return;
+
+    _realtimeReconnectAttempts += 1;
+    if (_realtimeReconnectAttempts < 3) {
+      debugPrint('rt_metrics stale, resubscribing (${_realtimeReconnectAttempts})');
+      try {
+        await _rtMetricsUnsubscribe?.call();
+      } catch (_) {}
+      try {
+        final pb = PocketBaseService().pb;
+        await _subscribeRtMetrics(pb);
+      } catch (e) {
+        debugPrint('rt_metrics resubscribe failed: $e');
+      }
+      return;
+    }
+
+    debugPrint('rt_metrics stale, falling back to system_stats collection');
+    _rtMetricsHealthy = false;
+  }
+
+  List<_ChartTimeOption> get _chartTimeOptions {
+    final options = <_ChartTimeOption>[
+      if (_supportsRealtime1m)
+        const _ChartTimeOption('1m', '1m', Duration(minutes: 1)),
+      const _ChartTimeOption('1h', '1m', Duration(hours: 1)),
+      const _ChartTimeOption('1d', '20m', Duration(days: 1)),
+      const _ChartTimeOption('1w', '120m', Duration(days: 7)),
+      const _ChartTimeOption('1M', '480m', Duration(days: 30)),
+    ];
+    return options;
+  }
+
+  bool get _supportsRealtime1m {
+    return _compareSemVer(
+          widget.system.info['v']?.toString() ?? '',
+          '0.13.0',
+        ) >=
+        0;
+  }
+
+  _ChartTimeOption get _currentChartRange {
+    return _chartTimeOptions.firstWhere(
+      (option) => option.key == _chartTime,
+      orElse: () => _chartTimeOptions.first,
+    );
+  }
+
+  String get _currentChartType => _currentChartRange.type;
+
+  int get _maxChartPoints {
+    switch (_chartTime) {
+      case '1m':
+        return 60;
+      case '1h':
+        return 3600;
+      case '1d':
+        return 72;
+      case '1w':
+        return 84;
+      case '1M':
+        return 90;
+      default:
+        return 120;
+    }
+  }
+
+  Future<void> _setChartTime(String key) async {
+    final normalized = _chartTimeOptions.any((option) => option.key == key)
+        ? key
+        : _chartTimeOptions.first.key;
+    if (normalized == _chartTime) {
+      return;
+    }
+    final requestId = ++_chartLoadRequestId;
+    setState(() {
+      _chartTime = normalized;
+      _chartLoading = true;
+    });
+    await _fetchHistory(requestId: requestId);
+  }
+
+  String _pbTimestamp(DateTime date) {
+    final utc = date.toUtc();
+    String two(int value) => value.toString().padLeft(2, '0');
+    return '${utc.year}-${two(utc.month)}-${two(utc.day)} ${two(utc.hour)}:${two(utc.minute)}:${two(utc.second)}';
+  }
+
+  int _compareSemVer(String a, String b) {
+    List<int> parts(String value) {
+      return value
+          .split('.')
+          .map((part) => int.tryParse(part.replaceAll(RegExp(r'[^0-9]'), '')) ?? 0)
+          .toList();
+    }
+
+    final left = parts(a);
+    final right = parts(b);
+    for (var i = 0; i < 3; i++) {
+      final l = i < left.length ? left[i] : 0;
+      final r = i < right.length ? right[i] : 0;
+      if (l != r) return l.compareTo(r);
+    }
+    return 0;
+  }
+
   void _addSpot(List<FlSpot> spots, double x, double y) {
     spots.add(FlSpot(x, y));
-    if (spots.length > 60) {
+    if (spots.length > _maxChartPoints) {
       spots.removeAt(0);
     }
   }
 
-  Future<void> _fetchHistory() async {
+  void _appendStatsSnapshot(Map<String, dynamic> stats, dynamic createdAt) {
+    final DateTime time = createdAt is DateTime
+        ? createdAt.toLocal()
+        : createdAt is String
+        ? DateTime.parse(createdAt).toLocal()
+        : DateTime.now();
+    final double xVal = time.millisecondsSinceEpoch.toDouble();
+
+    double getDouble(dynamic val) {
+      if (val is int) return val.toDouble();
+      if (val is double) return val;
+      if (val is String) return double.tryParse(val) ?? 0.0;
+      return 0.0;
+    }
+
+    void updateCoreUsage(dynamic coreData) {
+      if (coreData is List) {
+        _cpuCoresUsage = coreData.map((v) => (v is num) ? v.toInt() : 0).toList();
+      } else if (coreData is num) {
+        _cpuCoresUsage = List.filled(coreData.toInt(), 0);
+      }
+    }
+
+    _addSpot(_cpuSpots, xVal, getDouble(stats['cpu']));
+    _addSpot(_ramSpots, xVal, getDouble(stats['mp']));
+    _addSpot(_diskSpots, xVal, getDouble(stats['dp']));
+
+    final netVal = (getDouble(stats['ns']) + getDouble(stats['nr'])) / 1024;
+    _addSpot(_netSpots, xVal, netVal);
+
+    updateCoreUsage(stats['cpus'] ?? stats['c']);
+
+    double gpuPowerTotal = 0;
+    double gpuUtilTotal = 0;
+    int gpuCount = 0;
+    double gpuVramUsed = 0;
+    final gpus = stats['g'];
+    if (gpus is Map) {
+      gpus.forEach((key, value) {
+        if (value is Map) {
+          if (value['p'] != null && value['p'] is num) {
+            gpuPowerTotal += (value['p'] as num).toDouble();
+          }
+          if (value['u'] != null && value['u'] is num) {
+            gpuUtilTotal += (value['u'] as num).toDouble();
+            gpuCount++;
+          }
+          if (value['mu'] != null && value['mu'] is num) {
+            gpuVramUsed += (value['mu'] as num).toDouble();
+          }
+        }
+      });
+    }
+
+    _addSpot(_gpuPowerSpots, xVal, gpuPowerTotal);
+    if (gpuCount > 0) {
+      _addSpot(_gpuUtilSpots, xVal, gpuUtilTotal / gpuCount);
+    }
+    if (gpuVramUsed > 0) {
+      _addSpot(_gpuVramSpots, xVal, _mbToGb(gpuVramUsed));
+    }
+  }
+
+  Future<void> _fetchHistory({required int requestId}) async {
     try {
       final pb = PocketBaseService().pb;
-      final records = await pb
-          .collection('system_stats')
-          .getList(
-            page: 1,
-            perPage: 60,
-            filter: 'system = "${widget.system.id}"',
-            sort: '-created',
-          );
+      final range = _currentChartRange;
+      final since = _pbTimestamp(DateTime.now().subtract(range.duration));
+      final records = await pb.collection('system_stats').getFullList(
+        batch: 500,
+        filter: 'system = "${widget.system.id}" && type = "${range.type}" && created > "$since"',
+        sort: 'created',
+      );
 
-      final reversed = records.items.reversed.toList();
+      final reversed = records.reversed.toList();
 
-      List<FlSpot> cpu = [];
-      List<FlSpot> ram = [];
-      List<FlSpot> disk = [];
-      List<FlSpot> net = [];
-      List<FlSpot> gpu = [];
-      List<FlSpot> gpuUtilSpots = [];
-      List<FlSpot> vram = [];
+      final cpu = <FlSpot>[];
+      final ram = <FlSpot>[];
+      final disk = <FlSpot>[];
+      final net = <FlSpot>[];
+      final gpu = <FlSpot>[];
+      final gpuUtilSpots = <FlSpot>[];
+      final vram = <FlSpot>[];
 
-      for (var r in reversed) {
-        final DateTime time = DateTime.parse(
-          r.get<String>('created'),
-        ).toLocal();
+      double getDouble(dynamic val) {
+        if (val is int) return val.toDouble();
+        if (val is double) return val;
+        if (val is String) return double.tryParse(val) ?? 0.0;
+        return 0.0;
+      }
+
+      for (final r in reversed) {
+        final createdAt = r.data['created'];
+        final DateTime time = createdAt is String
+            ? DateTime.parse(createdAt).toLocal()
+            : DateTime.now();
         final double xVal = time.millisecondsSinceEpoch.toDouble();
 
-        double getDouble(dynamic val) {
-          if (val is int) return val.toDouble();
-          if (val is double) return val;
-          if (val is String) return double.tryParse(val) ?? 0.0;
-          return 0.0;
-        }
-
         double extract(String key) {
-          if (r.data['stats'] is Map) {
-            final s = r.data['stats'];
-            if (s.containsKey(key)) return getDouble(s[key]);
+          final stats = r.data['stats'];
+          if (stats is Map && stats.containsKey(key)) {
+            return getDouble(stats[key]);
           }
           return 0.0;
         }
@@ -208,19 +393,16 @@ class _SystemDetailScreenState extends State<SystemDetailScreen> {
         ram.add(FlSpot(xVal, extract('mp')));
         disk.add(FlSpot(xVal, extract('dp')));
 
-        // Network: ns + nr (bytes/s to KB/s)
-        double netVal = (extract('ns') + extract('nr')) / 1024;
+        final netVal = (extract('ns') + extract('nr')) / 1024;
         net.add(FlSpot(xVal, netVal));
 
-        // GPU power, utilization, and VRAM (historical)
         double gpuPower = 0;
         double gpuUtilTotal = 0;
         int gpuCount = 0;
         double gpuVramUsed = 0;
-        if (r.data['stats'] != null &&
-            r.data['stats']['g'] != null &&
-            r.data['stats']['g'] is Map) {
-          final gpus = r.data['stats']['g'] as Map;
+        final stats = r.data['stats'];
+        if (stats is Map && stats['g'] is Map) {
+          final gpus = stats['g'] as Map;
           gpus.forEach((key, value) {
             if (value is Map) {
               if (value['p'] != null && value['p'] is num) {
@@ -240,27 +422,23 @@ class _SystemDetailScreenState extends State<SystemDetailScreen> {
         if (gpuCount > 0) {
           gpuUtilSpots.add(FlSpot(xVal, gpuUtilTotal / gpuCount));
         }
-        // VRAM usage spot (MB; chart will display in GB)
         if (gpuVramUsed > 0) {
-          const double _mbPerGB = 1024;
-          vram.add(FlSpot(xVal, gpuVramUsed / _mbPerGB));
+          vram.add(FlSpot(xVal, _mbToGb(gpuVramUsed)));
         }
       }
 
-      // Get latest stats for detailed view
-      if (records.items.isNotEmpty) {
-        final latest = records.items.first.data['stats'];
-        if (latest != null) {
-          _latestStats = latest;
-          if (latest['cpus'] != null && latest['cpus'] is List) {
-            _cpuCoresUsage = (latest['cpus'] as List)
-                .map((v) => (v is num) ? v.toInt() : 0)
-                .toList();
+      if (records.isNotEmpty) {
+        final latest = records.last.data['stats'];
+        if (latest is Map) {
+          _latestStats = Map<String, dynamic>.from(latest);
+          final cpus = latest['cpus'];
+          if (cpus is List) {
+            _cpuCoresUsage = cpus.map((v) => (v is num) ? v.toInt() : 0).toList();
           }
         }
       }
 
-      if (mounted) {
+      if (mounted && requestId == _chartLoadRequestId) {
         setState(() {
           _cpuSpots = cpu;
           _ramSpots = ram;
@@ -269,12 +447,16 @@ class _SystemDetailScreenState extends State<SystemDetailScreen> {
           _gpuPowerSpots = gpu;
           _gpuUtilSpots = gpuUtilSpots;
           _gpuVramSpots = vram;
+          _chartLoading = false;
           _isLoading = false;
         });
       }
     } catch (e) {
-      if (mounted) {
-        setState(() => _isLoading = false);
+      if (mounted && requestId == _chartLoadRequestId) {
+        setState(() {
+          _chartLoading = false;
+          _isLoading = false;
+        });
       }
     }
   }
@@ -292,6 +474,54 @@ class _SystemDetailScreenState extends State<SystemDetailScreen> {
     } catch (e) {}
   }
 
+  Future<void> _fetchContainers() async {
+    try {
+      final pb = PocketBaseService().pb;
+      final result = await pb.collection('containers').getList(
+        page: 1,
+        perPage: 200,
+        filter: 'system = "${widget.system.id}"',
+        sort: '-updated',
+      );
+      if (!mounted) return;
+      setState(() {
+        _containers = result.items
+            .map((record) => Map<String, dynamic>.from(record.data))
+            .toList();
+        _containersLoading = false;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _containersLoading = false;
+      });
+    }
+  }
+
+  Future<void> _fetchSystemdServices() async {
+    try {
+      final pb = PocketBaseService().pb;
+      final result = await pb.collection('systemd_services').getList(
+        page: 1,
+        perPage: 2000,
+        filter: 'system = "${widget.system.id}"',
+        sort: 'name',
+      );
+      if (!mounted) return;
+      setState(() {
+        _systemdServices = result.items
+            .map((record) => Map<String, dynamic>.from(record.data))
+            .toList();
+        _systemdLoading = false;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _systemdLoading = false;
+      });
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final isLandscape =
@@ -302,6 +532,33 @@ class _SystemDetailScreenState extends State<SystemDetailScreen> {
         title: Text(widget.system.name),
         elevation: 0,
         actions: [
+          Padding(
+            padding: const EdgeInsets.only(right: 8),
+            child: DropdownButtonHideUnderline(
+              child: DropdownButton<String>(
+                value: _chartTimeOptions.any((option) => option.key == _chartTime)
+                    ? _chartTime
+                    : _chartTimeOptions.first.key,
+                icon: const Icon(Icons.expand_more),
+                style: Theme.of(context).textTheme.labelMedium,
+                dropdownColor: Theme.of(context).colorScheme.surface,
+                isDense: true,
+                onChanged: (value) {
+                  if (value != null) {
+                    _setChartTime(value);
+                  }
+                },
+                items: _chartTimeOptions
+                    .map(
+                      (option) => DropdownMenuItem<String>(
+                        value: option.key,
+                        child: Text(option.label),
+                      ),
+                    )
+                    .toList(),
+              ),
+            ),
+          ),
           IconButton(
             icon: const Icon(Icons.info_outline),
             tooltip: tr('details'),
@@ -366,6 +623,8 @@ class _SystemDetailScreenState extends State<SystemDetailScreen> {
           ),
           _buildSidebarItem(3, Icons.network_check, tr('network'), null),
           _buildSidebarItem(4, Icons.graphic_eq, 'GPU', null),
+          _buildSidebarItem(5, Icons.view_in_ar, tr('containers'), null),
+          _buildSidebarItem(6, Icons.settings_applications, tr('systemd'), null),
         ],
       ),
     );
@@ -452,6 +711,8 @@ class _SystemDetailScreenState extends State<SystemDetailScreen> {
         _buildTabItem(3, Icons.network_check, tr('network'), null),
         if ((_latestStats?['g'] as Map?)?.isNotEmpty ?? false)
           _buildTabItem(4, Icons.graphic_eq, 'GPU', null),
+        _buildTabItem(5, Icons.view_in_ar, tr('containers'), null),
+        _buildTabItem(6, Icons.settings_applications, tr('systemd'), null),
       ],
     );
   }
@@ -528,6 +789,10 @@ class _SystemDetailScreenState extends State<SystemDetailScreen> {
         return _buildNetworkPanel();
       case 4:
         return _buildGpuPanel();
+      case 5:
+        return _buildContainersPanel();
+      case 6:
+        return _buildSystemdPanel();
       default:
         return _buildCpuPanel();
     }
@@ -587,7 +852,14 @@ class _SystemDetailScreenState extends State<SystemDetailScreen> {
           const SizedBox(height: 16),
 
           // Main chart
-          _buildMiniChart(_cpuSpots, Colors.blue, isPercent: true, height: 150),
+          _buildMiniChart(
+            _cpuSpots,
+            Colors.blue,
+            isPercent: true,
+            height: 150,
+            loading: _chartLoading,
+            chartTime: _chartTime,
+          ),
           const SizedBox(height: 24),
 
           // Per-core CPU grid
@@ -657,6 +929,8 @@ class _SystemDetailScreenState extends State<SystemDetailScreen> {
             Colors.purple,
             isPercent: true,
             height: 150,
+            loading: _chartLoading,
+            chartTime: _chartTime,
           ),
           const SizedBox(height: 24),
 
@@ -718,6 +992,8 @@ class _SystemDetailScreenState extends State<SystemDetailScreen> {
             Colors.orange,
             isPercent: true,
             height: 150,
+            loading: _chartLoading,
+            chartTime: _chartTime,
           ),
           const SizedBox(height: 24),
 
@@ -776,6 +1052,8 @@ class _SystemDetailScreenState extends State<SystemDetailScreen> {
             Colors.green,
             isPercent: false,
             height: 150,
+            loading: _chartLoading,
+            chartTime: _chartTime,
           ),
           const SizedBox(height: 24),
 
@@ -807,6 +1085,166 @@ class _SystemDetailScreenState extends State<SystemDetailScreen> {
               return const SizedBox();
             }),
           ],
+        ],
+      ),
+    );
+  }
+
+  Widget _buildContainersPanel() {
+    if (_containersLoading) {
+      return const Center(child: CircularProgressIndicator());
+    }
+
+    if (_containers.isEmpty) {
+      return Center(child: Text(tr('no_data_available')));
+    }
+
+    return SingleChildScrollView(
+      padding: const EdgeInsets.all(16),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            tr('containers'),
+            style: Theme.of(context).textTheme.headlineMedium?.copyWith(
+              color: Theme.of(context).colorScheme.primary,
+              fontWeight: FontWeight.bold,
+            ),
+          ),
+          const SizedBox(height: 8),
+          Text(
+            '${_containers.length} ${tr('services')}',
+            style: Theme.of(context).textTheme.bodySmall,
+          ),
+          const SizedBox(height: 16),
+          ..._containers.map((container) {
+            final name = container['name']?.toString() ?? '-';
+            final image = container['image']?.toString() ?? '-';
+            final ports = container['ports']?.toString() ?? '-';
+            final status = container['status']?.toString() ?? '-';
+            final cpu = container['cpu'] is num
+                ? (container['cpu'] as num).toDouble()
+                : 0.0;
+            final memory = container['memory'] is num
+                ? (container['memory'] as num).toDouble()
+                : 0.0;
+            final net = container['net'] is num
+                ? (container['net'] as num).toDouble()
+                : 0.0;
+            final health = container['health']?.toString() ?? '-';
+
+            return Card(
+              margin: const EdgeInsets.only(bottom: 12),
+              child: ListTile(
+                title: Text(name),
+                subtitle: Padding(
+                  padding: const EdgeInsets.only(top: 6),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(image, overflow: TextOverflow.ellipsis),
+                      const SizedBox(height: 4),
+                      Text('CPU: ${cpu.toStringAsFixed(1)}%'),
+                      Text('Memory: ${_formatBytes(memory)}'),
+                      Text('Net: ${_formatBytesSpeed(net)}'),
+                      Text('Ports: $ports'),
+                      Text('Health: $health'),
+                    ],
+                  ),
+                ),
+                trailing: Text(
+                  status,
+                  textAlign: TextAlign.end,
+                  style: TextStyle(
+                    color: Theme.of(context).colorScheme.primary,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+                isThreeLine: true,
+              ),
+            );
+          }),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildSystemdPanel() {
+    if (_systemdLoading) {
+      return const Center(child: CircularProgressIndicator());
+    }
+
+    if (_systemdServices.isEmpty) {
+      return Center(child: Text(tr('no_data_available')));
+    }
+
+    return SingleChildScrollView(
+      padding: const EdgeInsets.all(16),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            tr('systemd'),
+            style: Theme.of(context).textTheme.headlineMedium?.copyWith(
+              color: Theme.of(context).colorScheme.primary,
+              fontWeight: FontWeight.bold,
+            ),
+          ),
+          const SizedBox(height: 8),
+          Text(
+            '${_systemdServices.length} ${tr('services')}',
+            style: Theme.of(context).textTheme.bodySmall,
+          ),
+          const SizedBox(height: 16),
+          ..._systemdServices.map((service) {
+            final name = service['name']?.toString() ?? '-';
+            final state = service['state']?.toString() ?? '-';
+            final sub = service['sub']?.toString() ?? '-';
+            final cpu = service['cpu'] is num
+                ? (service['cpu'] as num).toDouble()
+                : 0.0;
+            final cpuPeak = service['cpuPeak'] is num
+                ? (service['cpuPeak'] as num).toDouble()
+                : 0.0;
+            final memory = service['memory'] is num
+                ? (service['memory'] as num).toDouble()
+                : 0.0;
+            final memPeak = service['memPeak'] is num
+                ? (service['memPeak'] as num).toDouble()
+                : 0.0;
+            final updated = service['updated'] is num
+                ? DateTime.fromMillisecondsSinceEpoch(
+                    (service['updated'] as num).toInt(),
+                  )
+                : null;
+
+            return Card(
+              margin: const EdgeInsets.only(bottom: 12),
+              child: ListTile(
+                title: Text(name),
+                subtitle: Padding(
+                  padding: const EdgeInsets.only(top: 6),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text('State: $state'),
+                      Text('Sub: $sub'),
+                      Text('CPU: ${cpu.toStringAsFixed(1)}%'),
+                      Text('CPU Peak: ${cpuPeak.toStringAsFixed(1)}%'),
+                      Text('Memory: ${_formatBytes(memory)}'),
+                      Text('Memory Peak: ${_formatBytes(memPeak)}'),
+                      if (updated != null)
+                        Text(
+                          'Updated: ${updated.toLocal()}',
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                    ],
+                  ),
+                ),
+                isThreeLine: true,
+              ),
+            );
+          }),
         ],
       ),
     );
@@ -890,61 +1328,182 @@ class _SystemDetailScreenState extends State<SystemDetailScreen> {
     required bool isPercent,
     double height = 120,
     double? maxY,
+    bool loading = false,
+    String chartTime = '1h',
   }) {
     double? effectiveMaxY = isPercent ? 100 : maxY;
     if (!isPercent && maxY == null && spots.isNotEmpty) {
-      effectiveMaxY =
-          spots.map((s) => s.y).reduce((a, b) => a > b ? a : b) * 1.2;
+      effectiveMaxY = spots.map((s) => s.y).reduce((a, b) => a > b ? a : b) * 1.2;
       if (effectiveMaxY! < 1) effectiveMaxY = 1;
     }
 
     return SizedBox(
       height: height,
-      child: spots.isEmpty
+      child: loading
+          ? const Center(child: CircularProgressIndicator())
+          : spots.isEmpty
           ? Center(child: Text(tr('no_history')))
-          : LineChart(
-              LineChartData(
-                gridData: FlGridData(show: true, drawVerticalLine: false),
-                titlesData: FlTitlesData(
-                  leftTitles: AxisTitles(
-                    sideTitles: SideTitles(
-                      showTitles: true,
-                      reservedSize: 35,
-                      getTitlesWidget: (value, meta) => Text(
-                        value.toInt().toString(),
-                        style: const TextStyle(fontSize: 10),
+          : Container(
+              decoration: BoxDecoration(
+                gradient: LinearGradient(
+                  begin: Alignment.topLeft,
+                  end: Alignment.bottomRight,
+                  colors: [
+                    color.withValues(alpha: 0.08),
+                    Theme.of(context).colorScheme.surfaceContainerHighest
+                        .withValues(alpha: 0.38),
+                  ],
+                ),
+                borderRadius: BorderRadius.circular(18),
+                border: Border.all(color: color.withValues(alpha: 0.14)),
+              ),
+              padding: const EdgeInsets.fromLTRB(10, 10, 10, 6),
+              child: LineChart(
+                LineChartData(
+                  minX: spots.first.x,
+                  maxX: spots.length > 1 ? spots.last.x : spots.first.x + 1,
+                  minY: 0,
+                  maxY: effectiveMaxY,
+                  clipData: const FlClipData.all(),
+                  gridData: FlGridData(
+                    show: true,
+                    drawVerticalLine: false,
+                    horizontalInterval: isPercent
+                        ? 25
+                        : (effectiveMaxY != null ? effectiveMaxY / 4 : null),
+                    getDrawingHorizontalLine: (value) => FlLine(
+                      color: color.withValues(alpha: 0.08),
+                      strokeWidth: 1,
+                    ),
+                  ),
+                  titlesData: FlTitlesData(
+                    leftTitles: AxisTitles(
+                      sideTitles: SideTitles(
+                        showTitles: true,
+                        reservedSize: 34,
+                        interval: isPercent
+                            ? 25
+                            : (effectiveMaxY != null ? effectiveMaxY / 4 : null),
+                        getTitlesWidget: (value, meta) {
+                          final label = isPercent
+                              ? '${value.toInt()}%'
+                              : value >= 10
+                                  ? value.toStringAsFixed(0)
+                                  : value.toStringAsFixed(1);
+                          return Padding(
+                            padding: const EdgeInsets.only(right: 4),
+                            child: Text(
+                              label,
+                              style: TextStyle(
+                                fontSize: 10,
+                                color: Theme.of(
+                                  context,
+                                ).colorScheme.onSurfaceVariant,
+                              ),
+                            ),
+                          );
+                        },
                       ),
                     ),
-                  ),
-                  bottomTitles: const AxisTitles(
-                    sideTitles: SideTitles(showTitles: false),
-                  ),
-                  rightTitles: const AxisTitles(
-                    sideTitles: SideTitles(showTitles: false),
-                  ),
-                  topTitles: const AxisTitles(
-                    sideTitles: SideTitles(showTitles: false),
-                  ),
-                ),
-                borderData: FlBorderData(show: true),
-                lineBarsData: [
-                  LineChartBarData(
-                    spots: spots,
-                    isCurved: true,
-                    color: color,
-                    barWidth: 2,
-                    dotData: const FlDotData(show: false),
-                    belowBarData: BarAreaData(
-                      show: true,
-                      color: color.withValues(alpha: 0.2),
+                    bottomTitles: AxisTitles(
+                      sideTitles: SideTitles(
+                        showTitles: true,
+                        reservedSize: 30,
+                        interval: _chartXAxisInterval(chartTime),
+                        getTitlesWidget: (value, meta) {
+                          final label = _formatChartXAxisLabel(
+                            DateTime.fromMillisecondsSinceEpoch(value.toInt()),
+                            chartTime,
+                          );
+                          return Padding(
+                            padding: const EdgeInsets.only(top: 6),
+                            child: Text(
+                              label,
+                              style: TextStyle(
+                                fontSize: 9,
+                                color: Theme.of(
+                                  context,
+                                ).colorScheme.onSurfaceVariant,
+                              ),
+                            ),
+                          );
+                        },
+                      ),
+                    ),
+                    topTitles: const AxisTitles(
+                      sideTitles: SideTitles(showTitles: false),
+                    ),
+                    rightTitles: const AxisTitles(
+                      sideTitles: SideTitles(showTitles: false),
                     ),
                   ),
-                ],
-                minY: 0,
-                maxY: effectiveMaxY,
+                  borderData: FlBorderData(show: false),
+                  lineBarsData: [
+                    LineChartBarData(
+                      spots: spots,
+                      isCurved: true,
+                      color: color,
+                      barWidth: 2.5,
+                      curveSmoothness: 0.25,
+                      dotData: const FlDotData(show: false),
+                      belowBarData: BarAreaData(
+                        show: true,
+                        color: color.withValues(alpha: 0.22),
+                      ),
+                    ),
+                  ],
+                ),
               ),
             ),
     );
+  }
+
+  double _chartXAxisInterval(String chartTime) {
+    switch (chartTime) {
+      case '1m':
+        return 15000;
+      case '1h':
+        return 15 * 60 * 1000;
+      case '1d':
+        return 6 * 60 * 60 * 1000;
+      case '1w':
+        return 24 * 60 * 60 * 1000;
+      case '1M':
+        return 5 * 24 * 60 * 60 * 1000;
+      default:
+        return 15 * 60 * 1000;
+    }
+  }
+
+  String _formatChartXAxisLabel(DateTime time, String chartTime) {
+    String two(int value) => value.toString().padLeft(2, '0');
+    const months = [
+      'Jan',
+      'Feb',
+      'Mar',
+      'Apr',
+      'May',
+      'Jun',
+      'Jul',
+      'Aug',
+      'Sep',
+      'Oct',
+      'Nov',
+      'Dec',
+    ];
+
+    switch (chartTime) {
+      case '1m':
+        return '${two(time.hour)}:${two(time.minute)}:${two(time.second)}';
+      case '1h':
+      case '1d':
+        return '${two(time.hour)}:${two(time.minute)}';
+      case '1w':
+      case '1M':
+        return '${months[time.month - 1]} ${time.day}';
+      default:
+        return '${two(time.hour)}:${two(time.minute)}';
+    }
   }
 
   Widget _buildStatsGrid(List<_StatItem> items) {
@@ -1007,6 +1566,10 @@ class _SystemDetailScreenState extends State<SystemDetailScreen> {
     return '${_formatBytes(bytesPerSec)}/s';
   }
 
+  double _mbToGb(double mb) {
+    return mb / 1024;
+  }
+
   // GPU panel
   // Look up basic specs (max VRAM in GB, max power in W) for known GPU models
   Map<String, double> _gpuSpecs(String model) {
@@ -1039,7 +1602,7 @@ class _SystemDetailScreenState extends State<SystemDetailScreen> {
           final _gpuName = gpu['n']?.toString() ?? '';
           final _specs = _gpuSpecs(_gpuName);
 
-          // VRAM total (mt) – may be number or string, convert from MB to GB
+          // VRAM total (mt) is reported as MB by Beszel's web UI.
           var mtVal = gpu['mt'];
           double? vramMb;
           if (mtVal is num) {
@@ -1049,7 +1612,7 @@ class _SystemDetailScreenState extends State<SystemDetailScreen> {
           }
           double vramGb = 0.0;
           if (vramMb != null) {
-            vramGb = vramMb / 1024;
+            vramGb = _mbToGb(vramMb);
           } else if (_specs['vram'] != null && _specs['vram']! > 0) {
             vramGb = _specs['vram']!;
           }
@@ -1099,6 +1662,8 @@ class _SystemDetailScreenState extends State<SystemDetailScreen> {
               Colors.blue,
               isPercent: true,
               height: 150,
+              loading: _chartLoading,
+              chartTime: _chartTime,
             ),
             const SizedBox(height: 24),
           ],
@@ -1115,6 +1680,8 @@ class _SystemDetailScreenState extends State<SystemDetailScreen> {
               isPercent: false,
               height: 150,
               maxY: maxVramGb > 0 ? maxVramGb : null,
+              loading: _chartLoading,
+              chartTime: _chartTime,
             ),
             const SizedBox(height: 24),
           ],
@@ -1131,6 +1698,8 @@ class _SystemDetailScreenState extends State<SystemDetailScreen> {
               isPercent: false,
               height: 150,
               maxY: maxPowerW > 0 ? maxPowerW : null,
+              loading: _chartLoading,
+              chartTime: _chartTime,
             ),
             const SizedBox(height: 24),
           ],
@@ -1159,11 +1728,6 @@ class _SystemDetailScreenState extends State<SystemDetailScreen> {
                 final vramTotalMb = gpu['mt'] is num
                     ? (gpu['mt'] as num).toDouble()
                     : null;
-
-                // Convert MB to bytes for proper formatting.
-                final vramUsedBytes = vramUsedMb != null
-                    ? vramUsedMb * 1024 * 1024
-                    : null;
                 // Fallback specs based on model name
                 final _specs = _gpuSpecs(name);
                 final fallbackTotal =
@@ -1183,9 +1747,9 @@ class _SystemDetailScreenState extends State<SystemDetailScreen> {
                           Text(
                             'Utilization: ${utilisation.toStringAsFixed(1)}%',
                           ),
-                        if (vramUsedBytes != null && totalVram != null)
+                        if (vramUsedMb != null && totalVram != null)
                           Text(
-                            'VRAM: ${_formatBytes(vramUsedBytes)} / ${_formatBytes(totalVram)}',
+                            'VRAM: ${_formatBytes(vramUsedMb * 1024 * 1024)} / ${_formatBytes(totalVram)}',
                           ),
                       ],
                     ),
@@ -1209,4 +1773,29 @@ class _StatItem {
   final String label;
   final String value;
   _StatItem(this.label, this.value);
+}
+
+class _ChartTimeOption {
+  final String key;
+  final String type;
+  final Duration duration;
+
+  const _ChartTimeOption(this.key, this.type, this.duration);
+
+  String get label {
+    switch (key) {
+      case '1m':
+        return '1 minute';
+      case '1h':
+        return '1 hour';
+      case '1d':
+        return '1 day';
+      case '1w':
+        return '1 week';
+      case '1M':
+        return '1 month';
+      default:
+        return key;
+    }
+  }
 }
